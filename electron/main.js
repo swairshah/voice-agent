@@ -1,15 +1,18 @@
-const { app, BrowserWindow, Menu, Tray } = require('electron');
+const { app, BrowserWindow, Menu, Tray, globalShortcut } = require('electron');
 const path = require('path');
 const isDev = require('electron-is-dev');
 
 let mainWindow;
 let tray;
+let isAlwaysOnTop = false;
 
 function createWindow() {
-  // Create window options
   const windowOptions = {
-    width: 800,
-    height: 600,
+    width: 400,
+    height: 650,
+    resizable: true,
+    minWidth: 400,
+    minHeight: 500,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -17,7 +20,7 @@ function createWindow() {
     }
   };
   
-  // Try to add the icon if it exists
+  // add the icon if it exists
   try {
     const iconPath = path.join(__dirname, 'assets/icon.png');
     if (require('fs').existsSync(iconPath)) {
@@ -29,18 +32,23 @@ function createWindow() {
   
   mainWindow = new BrowserWindow(windowOptions);
 
-  // Try to load the FastAPI server's URL
-  mainWindow.loadURL('http://localhost:8000').catch(error => {
-    console.error('Failed to connect to server:', error);
-    
-    // Show error page if server connection fails
-    mainWindow.loadFile(path.join(__dirname, 'error.html'));
-  });
+  // Try connecting to the server
+  const serverUrl = 'http://localhost:8000';
+  
+  // First check if the server is available using fetch
+  require('electron').net.fetch(serverUrl, { method: 'HEAD' })
+    .then(() => {
+      // Server is up, load the URL
+      mainWindow.loadURL(serverUrl);
+    })
+    .catch(error => {
+      console.error('Failed to connect to server:', error);
+      
+      // Show error page if server connection fails
+      mainWindow.loadFile(path.join(__dirname, 'error.html'));
+    });
 
-  // Open DevTools in dev mode
-  if (isDev) {
-    mainWindow.webContents.openDevTools();
-  }
+  // DevTools toggled with keyboard shortcuts
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -90,9 +98,35 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   
+  // Register global shortcuts
+  // Ctrl+Shift+D to toggle DevTools
+  globalShortcut.register('CommandOrControl+Shift+D', () => {
+    if (mainWindow) {
+      if (mainWindow.webContents.isDevToolsOpened()) {
+        mainWindow.webContents.closeDevTools();
+      } else {
+        mainWindow.webContents.openDevTools();
+      }
+    }
+  });
+  
+  // Ctrl+Shift+T to toggle 'always on top' and 'visible on all workspaces'
+  globalShortcut.register('CommandOrControl+Shift+T', () => {
+    if (mainWindow) {
+      isAlwaysOnTop = !isAlwaysOnTop;
+      mainWindow.setAlwaysOnTop(isAlwaysOnTop);
+      mainWindow.setVisibleOnAllWorkspaces(isAlwaysOnTop);
+    }
+  });
+  
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+// Unregister shortcuts when app is about to quit
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });
 
 app.on('window-all-closed', () => {
