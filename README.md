@@ -1,4 +1,4 @@
-# LLM Voice Electron App 
+# FastRTC Electron App 
 
 An Electron desktop application wrapper for the LLM Voice app, built with Fastrtc[https://github.com/freddyaboulton/fastrtc].
 This is mainly a proof of concept of using Fastrtc with an Electron app. Using local STT and TTS.
