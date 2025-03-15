@@ -1,14 +1,20 @@
-# Voice Agent Electron App
+# LLM Voice Electron App 
 
-An Electron desktop application wrapper for the Voice Agent, built with FastRTC.
+An Electron desktop application wrapper for the LLM Voice app, built with Fastrtc[https://github.com/freddyaboulton/fastrtc].
+This is mainly a proof of concept of using Fastrtc with an Electron app. Using local STT and TTS.
+
+No real "agentic" stuff yet but you can checkout CompUse[https://github.com/swairshah/CompUse] 
+to see how to make your app do "agentic" stuff. Just replace the LLMHandler call with
+your own agentic handler.
+
 
 ## Prerequisites
 
 - Node.js (v14+)
-- npm or yarn
-- Python 3.8+
-- FastRTC library (`pip install fastrtc`)
-- Anthropic API key for Claude
+- npm 
+- Python 3.11+
+- Fastrtc library (`pip install fastrtc`)
+- Anthropic API key for Claude (again, replace with whatever llm provider)
 
 ## Setup
 
@@ -66,13 +72,28 @@ npm run dev
 
 The Electron app will connect to the locally running server at http://localhost:8000.
 
+We can change this to use any openport but i wanted to keep it simple.
+
 ## How it works
 
-This Electron app connects to a local FastAPI server that uses FastRTC for voice processing. The app:
+This Electron app connects to a local FastAPI server that uses Fastrtc for voice processing. The app:
 
 1. Opens an Electron window pointing to your locally running FastAPI server
-2. Provides a native desktop experience with system tray functionality
-3. Uses the same WebRTC connections and microphone permissions as the web interface
+2. Uses dual communication channels:
+   - WebRTC for real-time audio streaming (microphone input and TTS output)
+   - WebSocket for text communication (chat transcript and session management)
+3. Processes voice through a pipeline of:
+   - Speech-to-Text (STT) to transcribe user input
+   - LLM processing via Claude to generate responses
+   - Text-to-Speech (TTS) to convert responses to audio
+
+Fastrtc simplifies WebRTC implementation, which is traditionally complex. Fastrtc handles all the complex WebRTC setup with a simple `Stream` class that can be mounted on a FastAPI app. We get built-in functionality that would otherwise require custom implementation. This is done by the `ReplyOnPause`, check out the `main.py` file to see how it works.
+
+Without Fastrtc, implementing this voice interface would require:
+- Custom WebRTC signaling server implementation
+- Complex peer connection and media stream handling
+- Manual audio processing and turn detection
+- Separate STT/TTS integration
 
 The server and Electron app run as separate processes, giving you flexibility to:
 - Debug the server independently
