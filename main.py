@@ -2,6 +2,8 @@ import json
 import asyncio
 import time
 import threading
+from typing import Dict, List
+from datetime import timedelta
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -9,26 +11,25 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import logging
-from logging import info
-
 import anthropic
 from fastrtc import ReplyOnPause, Stream, get_stt_model, get_tts_model
 
 logger = logging.getLogger(__name__)
-
-# Store the main event loop for use with run_coroutine_threadsafe
+# Main event loop for async operations from non-async contexts
 main_event_loop = asyncio.get_event_loop()
-
 stt_model = get_stt_model()
 tts_model = get_tts_model()
 
-# Store active WebSocket connections and track sessions
-active_connections = {}
-active_sessions = {}
-session_message_history = {} 
+# Session storage with type hints
+active_connections: Dict[str, WebSocket] = {}
+active_sessions: Dict[str, float] = {}
+session_message_history: Dict[str, List[Dict[str, str]]] = {} 
 
-# Use thread-local storage to track the current session
-# This is more reliable than global variables
+# Session management constants
+SESSION_TIMEOUT = timedelta(minutes=30)
+CLEANUP_INTERVAL = 60  # seconds
+
+# Thread-local storage to track the current session across threads
 session_local = threading.local()
 
 def get_current_session_id():
@@ -41,19 +42,44 @@ def get_current_session_id():
         return session_id
     return None
 
-# Custom middleware to track WebRTC sessions
+async def cleanup_expired_sessions():
+    while True:
+        try:
+            await asyncio.sleep(CLEANUP_INTERVAL)
+            current_time = time.time()
+            expired = []
+            
+            # Find expired sessions
+            for session_id, timestamp in active_sessions.items():
+                if current_time - timestamp > SESSION_TIMEOUT.total_seconds():
+                    expired.append(session_id)
+            
+            # Clean up expired sessions and resources
+            for session_id in expired:
+                logger.info(f"Cleaning up expired session: {session_id}")
+                active_sessions.pop(session_id, None)
+                session_message_history.pop(session_id, None)
+                
+                # Close WebSocket connections for expired sessions
+                if session_id in active_connections:
+                    ws = active_connections[session_id]
+                    try:
+                        await ws.close(code=1000, reason="Session expired")
+                    except Exception as e:
+                        logger.error(f"Error closing WebSocket for expired session {session_id}: {e}")
+                    active_connections.pop(session_id, None)
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {e}")
+
+
+# Middleware to track WebRTC sessions from offer requests
 class WebRTCSessionMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Check if this is a WebRTC offer request
         if request.url.path == "/webrtc/offer" and request.method == "POST":
-            # Clone the request body for reading
             body_bytes = await request.body()
-            
-            # Create a new request with the same body
             request._receive = _receive_factory(body_bytes)
             
             try:
-                # Parse the body as JSON
                 data = json.loads(body_bytes)
                 webrtc_id = data.get("webrtc_id")
                 
@@ -63,44 +89,37 @@ class WebRTCSessionMiddleware(BaseHTTPMiddleware):
             except Exception as e:
                 logger.error(f"Error tracking WebRTC session: {e}")
         
-        # Process the request normally
-        response = await call_next(request)
-        return response
+        return await call_next(request)
 
-# Helper function to create a new receive function that returns the cloned body
+# Helper function to create a new receive function for cloned request body
 async def _receive_factory(body_bytes):
     async def receive():
         return {"type": "http.request", "body": body_bytes, "more_body": False}
     return receive
 
-# Handler wrapper to capture session ID from thread-local storage
-class AgentHandler:
+class LLMHandler:
     def __init__(self):
         self.client = anthropic.Anthropic()
-        pass
         
     def __call__(self, audio):
         # Set thread-local session ID at the beginning of each handler call
         session_local.session_id = self._get_active_session_id()
-        
-        # Call the original handler with the audio
         session_id = get_current_session_id()
         logger.info(f"Processing audio for session: {session_id}")
-   
+
+        # STT
         prompt = stt_model.stt(audio)
         logger.info(f"Transcribed: {prompt}")
         
         # Skip empty transcriptions
         if not prompt or prompt.strip() == "":
-            print("Empty transcription detected, skipping processing")
-            # Return an empty audio chunk to maintain the generator protocol
             yield b""
             return
         
         if session_id not in session_message_history:
             session_message_history[session_id] = []
         
-        # broadcast message to sessions
+        # Function to broadcast messages to the WebSocket client
         def broadcast_message(message, log_prefix=""):
             message_json = json.dumps(message)
             logger.info(f"{log_prefix}: {message_json}")
@@ -112,7 +131,6 @@ class AgentHandler:
                         active_connections[session_id].send_text(message_json),
                         main_event_loop
                     )
-                    logger.info(f"Queued message for session {session_id}")
                 except Exception as e:
                     logger.error(f"Error sending message to session {session_id}: {e}")
         
@@ -124,10 +142,8 @@ class AgentHandler:
             }
             broadcast_message(user_message, "Sending user message")
             
-            # Add user message to history
             session_message_history[session_id].append({"role": "user", "content": prompt})
             
-            # Process with Claude using full conversation history
             response = self.client.messages.create(
                 model="claude-3-5-sonnet-20241022",
                 max_tokens=100,
@@ -136,10 +152,8 @@ class AgentHandler:
             reply_text = response.content[0].text
             logger.info(f"Assistant response: {reply_text}")
 
-            # Add assistant message to history
             session_message_history[session_id].append({"role": "assistant", "content": reply_text})
 
-            # Send assistant message
             assistant_message = {
                 "role": "assistant", 
                 "content": reply_text,
@@ -147,99 +161,63 @@ class AgentHandler:
             }
             broadcast_message(assistant_message, "Sending assistant message")
 
-            # Stream TTS audio for the reply
+            # Stream TTS audio 
             for audio_chunk in tts_model.stream_tts_sync(reply_text):
                 yield audio_chunk
                 
         except Exception as e:
             logger.error(f"Error in agent_handler: {e}")
-            # Send error message that won't be displayed as user/assistant message
             error_message = {
                 "role": "infolog", 
                 "content": "Sorry, there was an error processing your request. Please try again.",
-                "type": "error_internal"  # Special type that won't be displayed as a chat message
+                "type": "error_internal"
             }
             broadcast_message(error_message, "Sending error message")
-            # Return empty audio so the function completes
             yield b""
-
         
     def _get_active_session_id(self):
-       # If there are active sessions, use the most recent one
+       # Get the most recent active session
        if active_sessions:
            session_id, _ = max(active_sessions.items(), key=lambda x: x[1])
-           logger.info(f"Using session ID: {session_id}")
            return session_id
        return None
             
     def _get_all_active_sessions(self):
         return list(active_sessions.keys())
 
-# Cleanup task for expired sessions
-async def cleanup_expired_sessions():
-    """Clean up expired sessions (older than 30 minutes)"""
-    while True:
-        await asyncio.sleep(60)  # Check once per minute
-        current_time = time.time()
-        expired = []
-        
-        for session_id, timestamp in active_sessions.items():
-            # If session is older than 30 minutes
-            if current_time - timestamp > 1800:
-                expired.append(session_id)
-        
-        # Remove expired sessions
-        for session_id in expired:
-            print(f"Cleaning up expired session: {session_id}")
-            active_sessions.pop(session_id, None)
-            # Also clean up message history for expired sessions
-            if session_id in session_message_history:
-                del session_message_history[session_id]
-                print(f"Cleaned up message history for session: {session_id}")
-
-
-# FastAPI APP:
+# FastAPI app 
 app = FastAPI()
 app.add_middleware(WebRTCSessionMiddleware)
 
-# lifespan event to start background tasks
+# Start background cleanup task
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(cleanup_expired_sessions())
 
-handler = AgentHandler()
+handler = LLMHandler()
 stream = Stream(
     ReplyOnPause(handler),
     modality="audio",
     mode="send-receive"
 )
 
-# Debug FastRTC's stream object to understand its structure
-logger.info("FastRTC Stream object:")
-logger.info(f"Mode: {stream.mode}")
-logger.info(f"Modality: {stream.modality}")
-try:
-    logger.info(f"Stream attributes: {dir(stream)}")
-except Exception as e:
-    logger.error(f"Error inspecting stream object: {e}")
-
 stream.mount(app)
 
+# WebSocket endpoint for chat interface
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket, webrtc_id: str):
-    await websocket.accept()
-    logger.info(f"WebSocket connection established for session: {webrtc_id}")
-    
-    # Store the connection
-    active_connections[webrtc_id] = websocket
-
-    active_sessions[webrtc_id] = time.time()
-    
-    # Initialize message history if not exists
-    if webrtc_id not in session_message_history:
-        session_message_history[webrtc_id] = []
-    
     try:
+        await websocket.accept()
+        logger.info(f"WebSocket connection established for session: {webrtc_id}")
+        
+        # Register connection and update session timestamp
+        active_connections[webrtc_id] = websocket
+        active_sessions[webrtc_id] = time.time()
+        
+        if webrtc_id not in session_message_history:
+            session_message_history[webrtc_id] = []
+        
+        # Send welcome message
         await websocket.send_text(
             json.dumps({
                 "role": "infolog", 
@@ -248,26 +226,29 @@ async def websocket_endpoint(websocket: WebSocket, webrtc_id: str):
             })
         )
         
-        # Keep the connection open
+        # Keep connection open and listen for messages
         while True:
-            # Wait for messages from the client 
             data = await websocket.receive_text()
             logger.info(f"Received message from client: {data}")
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for session: {webrtc_id}")
-
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-
     finally:
-        # Clean up when the connection closes
-        if webrtc_id in active_connections:
-            del active_connections[webrtc_id]
+        # Clean up connection when closed
+        active_connections.pop(webrtc_id, None)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    with open("static/index.html", "r") as f:
-        return HTMLResponse(content=f.read(), status_code=200)
+    try:
+        with open("static/index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read(), status_code=200)
+    except FileNotFoundError:
+        logger.error("index.html file not found")
+        return HTMLResponse(content="File not found", status_code=404)
+    except Exception as e:
+        logger.error(f"Error reading index.html: {e}")
+        return HTMLResponse(content="Internal server error", status_code=500)
