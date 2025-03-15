@@ -4,10 +4,11 @@
   "description": "Electron app for Voice Agent",
   "main": "electron/main.js",
   "scripts": {
-    "start": "electron .",
-    "dev": "electron .",
+    "start": "concurrently \"uvicorn main:app --host 0.0.0.0 --port 8000 --reload\" \"electron .\"",
+    "dev": "concurrently \"uvicorn main:app --host 0.0.0.0 --port 8000 --reload\" \"electron .\"",
     "build": "electron-builder",
-    "package": "electron-builder --dir"
+    "package": "electron-builder --dir",
+    "backend": "uvicorn main:app --host 0.0.0.0 --port 0 --reload"
   },
   "dependencies": {
     "electron-is-dev": "^2.0.0"

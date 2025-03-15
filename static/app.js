@@ -47,19 +47,15 @@ startBtn.addEventListener("click", async () => {
         console.log("Raw data channel message:", event.data);
         
         try {
-            // Try to parse as JSON
             const msg = JSON.parse(event.data);
             
-            // Log the parsed data
             console.log("Parsed data channel message:", msg);
             
-            // Skip messages with type "log"
             if (msg.type === "log") {
                 console.log("Skipping log message:", msg);
                 return;
             }
             
-            // If it has role and content, display it
             if (msg.role && msg.content) {
                 console.log(`Displaying WebRTC message from ${msg.role}`);
                 appendMessage(msg.role, msg.content);
@@ -98,14 +94,6 @@ startBtn.addEventListener("click", async () => {
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
     
-    // Send the offer to the FastRTC backend.
-    // const response = await fetch("/webrtc/offer?webrtc_id=" + webrtcId, {
-    //     method: "POST",
-    //     headers: { "Content-Type": "application/json" },
-    //     //body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
-    //     body: JSON.stringify({ offer: { sdp: offer.sdp, type: offer.type } })
-
-    // });
     const response = await fetch("/webrtc/offer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -217,8 +205,6 @@ startBtn.addEventListener("click", async () => {
                 console.log("Ignoring ping message");
                 return;
             }
-            
-            // Handle different message formats
             
             // Case 1: Standard format with role and content
             if (dataCopy.role && dataCopy.content) {

@@ -1,13 +1,12 @@
-import os
 import json
 import asyncio
+from logging import info
 import time
 import threading
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
 
 from fastrtc import ReplyOnPause, Stream, get_stt_model, get_tts_model
 import anthropic
@@ -15,7 +14,6 @@ import anthropic
 # Store the main event loop for use with run_coroutine_threadsafe
 main_event_loop = asyncio.get_event_loop()
 
-client = anthropic.Anthropic()
 
 stt_model = get_stt_model()
 tts_model = get_tts_model()
@@ -23,6 +21,7 @@ tts_model = get_tts_model()
 # Store active WebSocket connections and track sessions
 active_connections = {}
 active_sessions = {}
+session_message_history = {} 
 
 # Use thread-local storage to track the current session
 # This is more reliable than global variables
@@ -71,138 +70,106 @@ async def _receive_factory(body_bytes):
     return receive
 
 # Handler wrapper to capture session ID from thread-local storage
-class HandlerWithSession:
-    def __init__(self, handler_func):
-        self.handler_func = handler_func
+class AgentHandler:
+    def __init__(self):
+        self.client = anthropic.Anthropic()
+        pass
         
     def __call__(self, audio):
         # Set thread-local session ID at the beginning of each handler call
         session_local.session_id = self._get_active_session_id()
         
         # Call the original handler with the audio
-        return self.handler_func(audio)
-    
-    def _get_active_session_id(self):
-        # If there are active sessions, use the most recent one
-        if active_sessions:
-            session_id, _ = max(active_sessions.items(), key=lambda x: x[1])
-            print(f"Using session ID: {session_id}")
-            return session_id
-        return None
+        session_id = get_current_session_id()
+        print(f"Processing audio for session: {session_id}")
+   
+        prompt = stt_model.stt(audio)
+        print(f"Transcribed: {prompt}")
         
-    def _get_all_active_sessions(self):
-        # Returns all active session IDs
-        return list(active_sessions.keys())
-
-# The actual handler function
-def echo_handler(audio):
-    # Get current session ID
-    session_id = get_current_session_id()
-    print(f"Processing audio for session: {session_id}")
-    
-    # Transcribe speech
-    prompt = stt_model.stt(audio)
-    print(f"Transcribed: {prompt}")
-    
-    # Helper function to broadcast message to sessions
-    def broadcast_message(message, log_prefix=""):
-        message_json = json.dumps(message)
-        print(f"{log_prefix}: {message_json}")
+        # Skip empty transcriptions
+        if not prompt or prompt.strip() == "":
+            print("Empty transcription detected, skipping processing")
+            # Return an empty audio chunk to maintain the generator protocol
+            yield b""
+            return
         
-        # First try the current session
-        if session_id and session_id in active_connections:
-            try:
-                # Queue message for the current session
-                asyncio.run_coroutine_threadsafe(
-                    active_connections[session_id].send_text(message_json),
-                    main_event_loop
-                )
-                print(f"Queued message for session {session_id}")
-            except Exception as e:
-                print(f"Error sending message to session {session_id}: {e}")
-                
-    # Send user message
-    user_message = {
-        "role": "user", 
-        "content": prompt,
-        "type": "text"
-    }
-    broadcast_message(user_message, "Sending user message")
-    
-    # Process with Claude
-    response = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=100,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    reply_text = response.content[0].text
-    print(f"Assistant response: {reply_text}")
-
-    # Send assistant message
-    assistant_message = {
-        "role": "assistant", 
-        "content": reply_text,
-        "type": "text"
-    }
-    broadcast_message(assistant_message, "Sending assistant message")
-
-    # Stream TTS audio for the reply
-    for audio_chunk in tts_model.stream_tts_sync(reply_text):
-        yield audio_chunk
-
-# Create the wrapped handler
-echo = HandlerWithSession(echo_handler)
-
-# WebSocket endpoint for text messages
-async def websocket_endpoint(websocket: WebSocket, webrtc_id: str):
-    # Check if a connection for this session already exists
-    if webrtc_id in active_connections:
-        print(f"Closing existing WebSocket for session {webrtc_id}")
-        try:
-            # Close the existing connection gracefully
-            old_websocket = active_connections[webrtc_id]
-            await old_websocket.close(code=1000, reason="Replaced by new connection")
-        except Exception as e:
-            print(f"Error closing existing WebSocket: {e}")
-    
-    await websocket.accept()
-    print(f"WebSocket connection established for session: {webrtc_id}")
-    
-    # Store the connection
-    active_connections[webrtc_id] = websocket
-    
-    # Update session timestamp
-    active_sessions[webrtc_id] = time.time()
-    
-    try:
-        # Send a welcome message
-        await websocket.send_text(
-            json.dumps({
-                "role": "system", 
-                "content": "Connected to voice agent. Your conversation will appear here.",
-                "type": "text"  # Add type field explicitly
-            })
-        )
+        if session_id not in session_message_history:
+            session_message_history[session_id] = []
         
-        # Keep the connection open
-        while True:
-            # Wait for messages from the client (not needed for our use case, but keeps the connection alive)
-            data = await websocket.receive_text()
-            print(f"Received message from client (webrtc_id={webrtc_id}): {data}")
+        # broadcast message to sessions
+        def broadcast_message(message, log_prefix=""):
+            message_json = json.dumps(message)
+            print(f"{log_prefix}: {message_json}")
             
-            # Don't echo back confirmations to avoid "log" noise
-            # Just log the message to server console instead
-            print(f"Processing client message: {data[:100]}{'...' if len(data) > 100 else ''}")
-    except WebSocketDisconnect:
-        print(f"WebSocket disconnected for session: {webrtc_id}")
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-    finally:
-        # Clean up when the connection closes
-        if webrtc_id in active_connections:
-            del active_connections[webrtc_id]
-        # Keep the session active for a while in case of reconnects
-        # It will be cleaned up by the cleanup task
+            if session_id and session_id in active_connections:
+                try:
+                    # Queue message for the current session
+                    asyncio.run_coroutine_threadsafe(
+                        active_connections[session_id].send_text(message_json),
+                        main_event_loop
+                    )
+                    print(f"Queued message for session {session_id}")
+                except Exception as e:
+                    print(f"Error sending message to session {session_id}: {e}")
+        
+        try:            
+            user_message = {
+                "role": "user", 
+                "content": prompt,
+                "type": "text"
+            }
+            broadcast_message(user_message, "Sending user message")
+            
+            # Add user message to history
+            session_message_history[session_id].append({"role": "user", "content": prompt})
+            
+            # Process with Claude using full conversation history
+            response = self.client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=100,
+                messages=session_message_history[session_id]
+            )
+            reply_text = response.content[0].text
+            print(f"Assistant response: {reply_text}")
+
+            # Add assistant message to history
+            session_message_history[session_id].append({"role": "assistant", "content": reply_text})
+
+            # Send assistant message
+            assistant_message = {
+                "role": "assistant", 
+                "content": reply_text,
+                "type": "text"
+            }
+            broadcast_message(assistant_message, "Sending assistant message")
+
+            # Stream TTS audio for the reply
+            for audio_chunk in tts_model.stream_tts_sync(reply_text):
+                yield audio_chunk
+                
+        except Exception as e:
+            print(f"Error in agent_handler: {e}")
+            # Send error message that won't be displayed as user/assistant message
+            error_message = {
+                "role": "system", 
+                "content": "Sorry, there was an error processing your request. Please try again.",
+                "type": "error_internal"  # Special type that won't be displayed as a chat message
+            }
+            broadcast_message(error_message, "Sending error message")
+            # Return empty audio so the function completes
+            yield b""
+
+        
+    def _get_active_session_id(self):
+       # If there are active sessions, use the most recent one
+       if active_sessions:
+           session_id, _ = max(active_sessions.items(), key=lambda x: x[1])
+           print(f"Using session ID: {session_id}")
+           return session_id
+       return None
+            
+    def _get_all_active_sessions(self):
+        return list(active_sessions.keys())
 
 # Cleanup task for expired sessions
 async def cleanup_expired_sessions():
@@ -221,21 +188,24 @@ async def cleanup_expired_sessions():
         for session_id in expired:
             print(f"Cleaning up expired session: {session_id}")
             active_sessions.pop(session_id, None)
+            # Also clean up message history for expired sessions
+            if session_id in session_message_history:
+                del session_message_history[session_id]
+                print(f"Cleaned up message history for session: {session_id}")
 
-# Create the FastAPI app
+
+# FastAPI APP:
 app = FastAPI()
-
-# Add middleware for tracking WebRTC sessions
 app.add_middleware(WebRTCSessionMiddleware)
 
-# Add lifespan event to start background tasks
+# lifespan event to start background tasks
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(cleanup_expired_sessions())
 
-# Create the Stream instance with our echo handler
+handler = AgentHandler()
 stream = Stream(
-    ReplyOnPause(echo),
+    ReplyOnPause(handler),
     modality="audio",
     mode="send-receive"
 )
@@ -245,15 +215,12 @@ print("FastRTC Stream object:")
 print(f"Mode: {stream.mode}")
 print(f"Modality: {stream.modality}")
 try:
-    # Check if we can access any internal configuration that might help us understand 
-    # where 'log' messages are coming from
     print(f"Stream attributes: {dir(stream)}")
 except Exception as e:
     print(f"Error inspecting stream object: {e}")
 
 stream.mount(app)
 
-# Add WebSocket endpoint
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket, webrtc_id: str):
     await websocket.accept()
@@ -261,28 +228,34 @@ async def websocket_endpoint(websocket: WebSocket, webrtc_id: str):
     
     # Store the connection
     active_connections[webrtc_id] = websocket
-    
-    # Update session timestamp
+
     active_sessions[webrtc_id] = time.time()
     
+    # Initialize message history if not exists
+    if webrtc_id not in session_message_history:
+        session_message_history[webrtc_id] = []
+    
     try:
-        # Send a welcome message
         await websocket.send_text(
             json.dumps({
                 "role": "system", 
-                "content": "Connected to voice agent. Your conversation will appear here."
+                "content": "Connected to voice agent. Your conversation will appear here.",
+                "type": "info"  
             })
         )
         
         # Keep the connection open
         while True:
-            # Wait for messages from the client (not needed for our use case, but keeps the connection alive)
+            # Wait for messages from the client 
             data = await websocket.receive_text()
             print(f"Received message from client: {data}")
+
     except WebSocketDisconnect:
         print(f"WebSocket disconnected for session: {webrtc_id}")
+
     except Exception as e:
         print(f"WebSocket error: {e}")
+
     finally:
         # Clean up when the connection closes
         if webrtc_id in active_connections:
