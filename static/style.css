@@ -41,6 +41,17 @@ body {
     align-self: flex-start;
 }
 
+.message.infolog {
+    background-color: #f8f9fa;
+    color: #6c757d;
+    border: 1px solid #dee2e6;
+    padding: 10px 15px;
+    margin: 10px auto;
+    text-align: center;
+    font-style: italic;
+    font-size: 0.9em;
+}
+
 #controls {
     padding: 8px;
     text-align: center;

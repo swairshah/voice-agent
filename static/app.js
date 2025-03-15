@@ -9,6 +9,101 @@ let localStream;
 let webrtcId;
 let eventSource;
 
+class ChatWebSocket {
+    constructor(wsUrl) {
+        this.wsUrl = wsUrl;
+        this.hasShownConnectionError = false;
+        this.messageCounter = 0;
+        this.keepAliveInterval = null;
+        this.connect();
+    }
+
+    connect() {
+        this.ws = new WebSocket(this.wsUrl);
+        this.setupEventHandlers();
+        this.startKeepAlive();
+    }
+
+    setupEventHandlers() {
+        this.ws.onopen = () => {
+            console.log("WebSocket connection established");
+            appendMessage("infolog", "Text chat connection established");
+            this.hasShownConnectionError = false;
+        };
+
+        this.ws.onmessage = this.handleMessage.bind(this);
+        this.ws.onerror = this.handleError.bind(this);
+        this.ws.onclose = this.handleClose.bind(this);
+    }
+
+    startKeepAlive() {
+        this.keepAliveInterval = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                try {
+                    this.ws.send(JSON.stringify({ type: "ping" }));
+                } catch (err) {
+                    console.error("Error sending ping:", err);
+                }
+            }
+        }, 30000);
+    }
+
+    handleMessage(event) {
+        this.messageCounter++;
+        console.log(`------ WebSocket Message #${this.messageCounter} Received ------`);
+        
+        try {
+            const data = JSON.parse(event.data);
+            const dataCopy = JSON.parse(JSON.stringify(data));
+            const parsedMessage = parseMessage(dataCopy);
+            
+            if (parsedMessage) {
+                appendMessage(parsedMessage.role, parsedMessage.content);
+            }
+        } catch (error) {
+            console.error("Error handling WebSocket message:", error);
+        }
+    }
+
+    handleError(error) {
+        console.error("WebSocket error:", error);
+        if (!this.hasShownConnectionError) {
+            appendMessage("infolog", "Text chat connection error. Some messages may not appear.");
+            this.hasShownConnectionError = true;
+        }
+        this.scheduleReconnect(5000);
+    }
+
+    handleClose(event) {
+        console.log("WebSocket connection closed:", event);
+        clearInterval(this.keepAliveInterval);
+        
+        if (peerConnection && peerConnection.connectionState === "connected") {
+            appendMessage("infolog", "Text chat connection closed. Voice connection still active. Attempting to reconnect...");
+            this.scheduleReconnect(2000);
+        }
+    }
+
+    scheduleReconnect(delay) {
+        setTimeout(() => {
+            if (peerConnection && peerConnection.connectionState === "connected" &&
+                (!this.ws || this.ws.readyState !== WebSocket.OPEN)) {
+                console.log("Attempting to reconnect WebSocket...");
+                this.connect();
+            }
+        }, delay);
+    }
+
+    close() {
+        clearInterval(this.keepAliveInterval);
+        if (this.ws) {
+            this.ws.onclose = null;
+            this.ws.onerror = null;
+            this.ws.close();
+        }
+    }
+}
+
 startBtn.addEventListener("click", async () => {
     startBtn.disabled = true;
     stopBtn.disabled = false;
@@ -77,7 +172,7 @@ startBtn.addEventListener("click", async () => {
         } catch (error) {
             // Not JSON, try to use as plain text
             console.log("Data channel message is not JSON, using as plain text");
-            appendMessage("system", event.data);
+            appendMessage("infolog", event.data);
         }
         
         console.log("------ End WebRTC Data Channel Message ------");
@@ -131,205 +226,11 @@ startBtn.addEventListener("click", async () => {
         window.chatWebSocket.close();
     }
 
-    // Connect to WebSocket for text messages
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws/chat?webrtc_id=${webrtcId}`;
+    window.chatWebSocket = new ChatWebSocket(wsUrl);
     
-    console.log("Connecting to WebSocket:", wsUrl);
-    const chatWebSocket = new WebSocket(wsUrl);
-    window.chatWebSocket = chatWebSocket;
-    
-    // Set a flag to track if we've shown a connection error
-    let hasShownConnectionError = false;
-    
-    // Setup event handlers for WebSocket
-    chatWebSocket.onopen = () => {
-        console.log("WebSocket connection established");
-        appendMessage("system", "Text chat connection established");
-        hasShownConnectionError = false;
-        
-        // Implement a ping mechanism to keep the connection alive
-        window.wsKeepAliveInterval = setInterval(() => {
-            if (chatWebSocket && chatWebSocket.readyState === WebSocket.OPEN) {
-                try {
-                    chatWebSocket.send(JSON.stringify({ type: "ping" }));
-                } catch (err) {
-                    console.error("Error sending ping:", err);
-                }
-            }
-        }, 30000); // Send ping every 30 seconds
-    };
-    
-    // Message counter to debug message order
-    let messageCounter = 0;
-    
-    chatWebSocket.onmessage = (event) => {
-        messageCounter++;
-        console.log(`------ WebSocket Message #${messageCounter} Received ------`);
-        console.log("Raw message data:", event.data);
-        
-        try {
-            // Parse the message
-            const data = JSON.parse(event.data);
-            
-            // Create a deep copy to prevent log mutation issues
-            const dataCopy = JSON.parse(JSON.stringify(data));
-            
-            // Extra debug logging to find the source of "log" messages
-            if (typeof data === 'object' && Object.keys(data).includes('log')) {
-                console.warn("Found 'log' key in message data:", data);
-                // If it contains a message, extract it
-                if (typeof data.log === 'string') {
-                    console.log("Converting 'log' message to system message");
-                    // Convert to proper format
-                    dataCopy.role = "system";
-                    dataCopy.content = data.log;
-                    dataCopy.type = "text";
-                }
-            }
-            
-            // Log as structured data for better readability
-            console.log({
-                messageId: messageCounter,
-                messageType: dataCopy.type || "unknown",
-                role: dataCopy.role || "missing",
-                contentPreview: dataCopy.content ? 
-                    (dataCopy.content.length > 50 ? 
-                        dataCopy.content.substring(0, 50) + "..." : dataCopy.content) 
-                    : "missing",
-                fullObject: dataCopy
-            });
-            
-            // Ignore ping messages
-            if (dataCopy.type === "ping") {
-                console.log("Ignoring ping message");
-                return;
-            }
-            
-            // Case 1: Standard format with role and content
-            if (dataCopy.role && dataCopy.content) {
-                console.log(`Displaying message from ${dataCopy.role}`);
-                appendMessage(dataCopy.role, dataCopy.content);
-                return;
-            }
-            
-            // Case 1.5: Special handling for 'log' messages - only log to console, don't display
-            if (dataCopy.log && typeof dataCopy.log === 'string') {
-                console.log("Found log message (not displaying):", dataCopy.log);
-                // Don't show log messages to the user
-                return;
-            }
-            
-            // Case 2: Old format or alternative format
-            if (typeof dataCopy === 'object') {
-                // Try to extract role and content from any fields that might contain them
-                const possibleRoles = ['role', 'speaker', 'sender', 'from'];
-                const possibleContents = ['content', 'message', 'text', 'body'];
-                
-                // Find first valid role
-                let role = null;
-                for (const field of possibleRoles) {
-                    if (dataCopy[field] && typeof dataCopy[field] === 'string') {
-                        role = dataCopy[field];
-                        break;
-                    }
-                }
-                
-                // Find first valid content
-                let content = null;
-                for (const field of possibleContents) {
-                    if (dataCopy[field] && typeof dataCopy[field] === 'string') {
-                        content = dataCopy[field];
-                        break;
-                    }
-                }
-                
-                // If we found both role and content, display the message
-                if (role && content) {
-                    console.log(`Displaying message using extracted values - Role: ${role}`);
-                    appendMessage(role, content);
-                    return;
-                }
-                
-                // Case 3: Try using top-level fields as role/content if object has only two fields
-                const keys = Object.keys(dataCopy);
-                if (keys.length === 2) {
-                    const firstVal = dataCopy[keys[0]];
-                    const secondVal = dataCopy[keys[1]];
-                    
-                    if (typeof firstVal === 'string' && typeof secondVal === 'string') {
-                        console.log(`Displaying message using field names - Role: ${keys[0]}`);
-                        appendMessage(keys[0], secondVal);
-                        return;
-                    }
-                }
-            }
-            
-            // If we get here, we couldn't extract role and content
-            console.error("Invalid message format. Couldn't extract role or content:", dataCopy);
-            
-        } catch (error) {
-            console.error("Error parsing WebSocket message:", error);
-        }
-        
-        console.log(`------ End WebSocket Message #${messageCounter} ------`);
-    };
-    
-    chatWebSocket.onerror = (error) => {
-        console.error("WebSocket error:", error);
-        if (!hasShownConnectionError) {
-            appendMessage("system", "Text chat connection error. Some messages may not appear.");
-            hasShownConnectionError = true;
-        }
-        
-        // Try to reconnect after a delay
-        setTimeout(() => {
-            if (peerConnection && peerConnection.connectionState === "connected" && 
-                (!window.chatWebSocket || window.chatWebSocket.readyState !== WebSocket.OPEN)) {
-                console.log("Attempting to reconnect WebSocket...");
-                const newWebSocket = new WebSocket(wsUrl);
-                window.chatWebSocket = newWebSocket;
-                
-                // Set up the same event handlers for the new connection
-                newWebSocket.onopen = chatWebSocket.onopen;
-                newWebSocket.onmessage = chatWebSocket.onmessage;
-                newWebSocket.onerror = chatWebSocket.onerror;
-                newWebSocket.onclose = chatWebSocket.onclose;
-            }
-        }, 5000); // Wait 5 seconds before reconnecting
-    };
-    
-    chatWebSocket.onclose = (event) => {
-        console.log("WebSocket connection closed:", event);
-        
-        // Clear the keep-alive interval
-        if (window.wsKeepAliveInterval) {
-            clearInterval(window.wsKeepAliveInterval);
-            window.wsKeepAliveInterval = null;
-        }
-        
-        // Only show a message if this wasn't intentionally closed
-        if (peerConnection && peerConnection.connectionState === "connected") {
-            appendMessage("system", "Text chat connection closed. Voice connection still active. Attempting to reconnect...");
-            
-            // Try to reconnect after a delay
-            setTimeout(() => {
-                if (peerConnection && peerConnection.connectionState === "connected") {
-                    console.log("Attempting to reconnect WebSocket after close...");
-                    const newWebSocket = new WebSocket(wsUrl);
-                    window.chatWebSocket = newWebSocket;
-                    
-                    // Set up the same event handlers for the new connection
-                    newWebSocket.onopen = chatWebSocket.onopen;
-                    newWebSocket.onmessage = chatWebSocket.onmessage;
-                    newWebSocket.onerror = chatWebSocket.onerror;
-                    newWebSocket.onclose = chatWebSocket.onclose;
-                }
-            }, 2000); // Wait 2 seconds before reconnecting
-        }
-    };
-    
-    // Also try to use EventSource for text updates as a fallback
+    // try to use EventSource for text updates as a fallback
     try {
         eventSource = new EventSource(`/outputs?webrtc_id=${webrtcId}`);
         console.log("EventSource connection attempted to:", `/outputs?webrtc_id=${webrtcId}`);
@@ -383,23 +284,13 @@ stopBtn.addEventListener("click", () => {
         eventSource = null;
     }
     
-    // Clear any WebSocket keep-alive interval
-    if (window.wsKeepAliveInterval) {
-        clearInterval(window.wsKeepAliveInterval);
-        window.wsKeepAliveInterval = null;
-    }
-    
     // Close WebSocket
     if (window.chatWebSocket) {
-        // Remove event handlers to prevent reconnection attempts
-        window.chatWebSocket.onclose = null;
-        window.chatWebSocket.onerror = null;
         window.chatWebSocket.close();
         window.chatWebSocket = null;
     }
     
-    // Add a system message to indicate the conversation has ended
-    appendMessage("system", "Conversation ended");
+    appendMessage("infolog", "Conversation ended");
 });
 
 // Utility to append chat messages.
@@ -416,7 +307,7 @@ function appendMessage(role, content) {
         content.toLowerCase().includes('message received') || 
         content.toLowerCase().includes('received message') ||
         // Skip connection status messages that might be duplicates
-        (role === 'system' && content.toLowerCase().includes('connection')) ||
+        (role === 'infolog' && content.toLowerCase().includes('connection')) ||
         // Skip any messages that look like debugging or internal logs
         content.toLowerCase().includes('log:') ||
         content.toLowerCase().includes('debug:') ||
@@ -427,7 +318,7 @@ function appendMessage(role, content) {
     }
     
     // Safety check for undefined or null values
-    if (!role) role = "system";
+    if (!role) role = "infolog";
     if (!content) {
         console.error("Attempted to display message with empty content");
         content = "(Empty message)";
@@ -439,19 +330,69 @@ function appendMessage(role, content) {
     const messageDiv = document.createElement("div");
     messageDiv.className = "message " + role;
     
-    // Special styling for system messages
-    if (role === "system") {
-        messageDiv.style.backgroundColor = "#f8f9fa";
-        messageDiv.style.color = "#6c757d";
-        messageDiv.style.border = "1px solid #dee2e6";
-        messageDiv.style.padding = "10px 15px";
-        messageDiv.style.margin = "10px auto";
-        messageDiv.style.textAlign = "center";
-        messageDiv.style.fontStyle = "italic";
-        messageDiv.style.fontSize = "0.9em";
+    if (role === "infolog") {
+        messageDiv.classList.add("infolog");
     }
     
     messageDiv.innerText = content;
     chatLog.appendChild(messageDiv);
     chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function parseMessage(data) {
+    // Skip certain message types
+    if (data.type === "ping") {
+        return null;
+    }
+
+    // Handle log messages
+    if (data.log && typeof data.log === 'string') {
+        return {
+            role: 'infolog',
+            content: data.log
+        };
+    }
+
+    // Standard format
+    if (data.role && data.content) {
+        return { role: data.role, content: data.content };
+    }
+
+    // Try to extract role and content from various fields
+    const possibleRoles = ['role', 'speaker', 'sender', 'from'];
+    const possibleContents = ['content', 'message', 'text', 'body'];
+    
+    let role = null;
+    for (const field of possibleRoles) {
+        if (data[field] && typeof data[field] === 'string') {
+            role = data[field];
+            break;
+        }
+    }
+    
+    let content = null;
+    for (const field of possibleContents) {
+        if (data[field] && typeof data[field] === 'string') {
+            content = data[field];
+            break;
+        }
+    }
+    
+    if (role && content) {
+        return { role, content };
+    }
+
+    // Try using top-level fields if object has only two fields
+    const keys = Object.keys(data);
+    if (keys.length === 2) {
+        const [firstKey, secondKey] = keys;
+        if (typeof data[firstKey] === 'string' && typeof data[secondKey] === 'string') {
+            return {
+                role: firstKey,
+                content: data[secondKey]
+            };
+        }
+    }
+
+    return null;
 }

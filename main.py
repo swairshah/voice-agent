@@ -1,19 +1,23 @@
 import json
 import asyncio
-from logging import info
 import time
 import threading
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from fastrtc import ReplyOnPause, Stream, get_stt_model, get_tts_model
+import logging
+from logging import info
+
 import anthropic
+from fastrtc import ReplyOnPause, Stream, get_stt_model, get_tts_model
+
+logger = logging.getLogger(__name__)
 
 # Store the main event loop for use with run_coroutine_threadsafe
 main_event_loop = asyncio.get_event_loop()
-
 
 stt_model = get_stt_model()
 tts_model = get_tts_model()
@@ -54,10 +58,10 @@ class WebRTCSessionMiddleware(BaseHTTPMiddleware):
                 webrtc_id = data.get("webrtc_id")
                 
                 if webrtc_id:
-                    print(f"Tracked WebRTC session: {webrtc_id}")
+                    logger.info(f"Tracked WebRTC session: {webrtc_id}")
                     active_sessions[webrtc_id] = time.time()
             except Exception as e:
-                print(f"Error tracking WebRTC session: {e}")
+                logger.error(f"Error tracking WebRTC session: {e}")
         
         # Process the request normally
         response = await call_next(request)
@@ -81,10 +85,10 @@ class AgentHandler:
         
         # Call the original handler with the audio
         session_id = get_current_session_id()
-        print(f"Processing audio for session: {session_id}")
+        logger.info(f"Processing audio for session: {session_id}")
    
         prompt = stt_model.stt(audio)
-        print(f"Transcribed: {prompt}")
+        logger.info(f"Transcribed: {prompt}")
         
         # Skip empty transcriptions
         if not prompt or prompt.strip() == "":
@@ -99,7 +103,7 @@ class AgentHandler:
         # broadcast message to sessions
         def broadcast_message(message, log_prefix=""):
             message_json = json.dumps(message)
-            print(f"{log_prefix}: {message_json}")
+            logger.info(f"{log_prefix}: {message_json}")
             
             if session_id and session_id in active_connections:
                 try:
@@ -108,9 +112,9 @@ class AgentHandler:
                         active_connections[session_id].send_text(message_json),
                         main_event_loop
                     )
-                    print(f"Queued message for session {session_id}")
+                    logger.info(f"Queued message for session {session_id}")
                 except Exception as e:
-                    print(f"Error sending message to session {session_id}: {e}")
+                    logger.error(f"Error sending message to session {session_id}: {e}")
         
         try:            
             user_message = {
@@ -130,7 +134,7 @@ class AgentHandler:
                 messages=session_message_history[session_id]
             )
             reply_text = response.content[0].text
-            print(f"Assistant response: {reply_text}")
+            logger.info(f"Assistant response: {reply_text}")
 
             # Add assistant message to history
             session_message_history[session_id].append({"role": "assistant", "content": reply_text})
@@ -148,10 +152,10 @@ class AgentHandler:
                 yield audio_chunk
                 
         except Exception as e:
-            print(f"Error in agent_handler: {e}")
+            logger.error(f"Error in agent_handler: {e}")
             # Send error message that won't be displayed as user/assistant message
             error_message = {
-                "role": "system", 
+                "role": "infolog", 
                 "content": "Sorry, there was an error processing your request. Please try again.",
                 "type": "error_internal"  # Special type that won't be displayed as a chat message
             }
@@ -164,7 +168,7 @@ class AgentHandler:
        # If there are active sessions, use the most recent one
        if active_sessions:
            session_id, _ = max(active_sessions.items(), key=lambda x: x[1])
-           print(f"Using session ID: {session_id}")
+           logger.info(f"Using session ID: {session_id}")
            return session_id
        return None
             
@@ -211,20 +215,20 @@ stream = Stream(
 )
 
 # Debug FastRTC's stream object to understand its structure
-print("FastRTC Stream object:")
-print(f"Mode: {stream.mode}")
-print(f"Modality: {stream.modality}")
+logger.info("FastRTC Stream object:")
+logger.info(f"Mode: {stream.mode}")
+logger.info(f"Modality: {stream.modality}")
 try:
-    print(f"Stream attributes: {dir(stream)}")
+    logger.info(f"Stream attributes: {dir(stream)}")
 except Exception as e:
-    print(f"Error inspecting stream object: {e}")
+    logger.error(f"Error inspecting stream object: {e}")
 
 stream.mount(app)
 
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket, webrtc_id: str):
     await websocket.accept()
-    print(f"WebSocket connection established for session: {webrtc_id}")
+    logger.info(f"WebSocket connection established for session: {webrtc_id}")
     
     # Store the connection
     active_connections[webrtc_id] = websocket
@@ -238,7 +242,7 @@ async def websocket_endpoint(websocket: WebSocket, webrtc_id: str):
     try:
         await websocket.send_text(
             json.dumps({
-                "role": "system", 
+                "role": "infolog", 
                 "content": "Connected to voice agent. Your conversation will appear here.",
                 "type": "info"  
             })
@@ -248,13 +252,13 @@ async def websocket_endpoint(websocket: WebSocket, webrtc_id: str):
         while True:
             # Wait for messages from the client 
             data = await websocket.receive_text()
-            print(f"Received message from client: {data}")
+            logger.info(f"Received message from client: {data}")
 
     except WebSocketDisconnect:
-        print(f"WebSocket disconnected for session: {webrtc_id}")
+        logger.info(f"WebSocket disconnected for session: {webrtc_id}")
 
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}")
 
     finally:
         # Clean up when the connection closes
