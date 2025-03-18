@@ -1,11 +1,19 @@
-# FastRTC Electron App 
+# FastRTC Voice Agent
 
-An Electron desktop application wrapper for the LLM Voice app, built with Fastrtc[https://github.com/freddyaboulton/fastrtc].
-This is mainly a proof of concept of using Fastrtc with an Electron app. Using local STT and TTS.
+A voice-based chat application for interacting with an LLM, built with Fastrtc[https://github.com/freddyaboulton/fastrtc].
+This is mainly a proof of concept of using Fastrtc in backend. We have an electron app and a standard issue webapp as frontend. 
+Using local STT and TTS models in backend. Though works well on my 2017 Intel chip macbook pro.
 
 No real "agentic" stuff yet but you can checkout CompUse[https://github.com/swairshah/CompUse] 
 to see how to make your app do "agentic" stuff. Just replace the LLMHandler call with
 your own agentic handler.
+
+## Client Applications
+
+This repository contains two client applications that connect to the same backend:
+
+1. **Electron App** - A desktop application built with Electron.
+2. **Webapp** - See the [webapp directory](./webapp) for more details.
 
 
 ## Prerequisites
@@ -49,7 +57,9 @@ npm install
 export ANTHROPIC_API_KEY=your_api_key
 ```
 
-## Running the app
+## Running the apps
+
+### Starting the Backend Server
 
 1. First, start the FastAPI server:
 
@@ -64,28 +74,50 @@ source .venv/bin/activate
 python main.py
 ```
 
-2. In a separate terminal, start the Electron app:
+The backend server will run at http://localhost:8000.
+
+### Running the Electron App
+
+In a separate terminal, start the Electron app:
 
 ```bash
 npm run dev
 ```
 
-The Electron app will connect to the locally running server at http://localhost:8000.
+The Electron app will connect to the locally running server.
 
-We can change this to use any openport but i wanted to keep it simple.
+### Running the Web App
+
+To run the TypeScript web application:
+
+```bash
+# Navigate to the webapp directory
+cd webapp
+
+# Install dependencies (first time only)
+npm install
+
+# Start the development server
+npm start
+```
+
+The web app will be available at http://localhost:3000 and will connect to the same backend server.
+
+Note: You can use either the Electron app or the web app with the same backend. Both provide similar functionality.
 
 ## How it works
 
-This Electron app connects to a local FastAPI server that uses Fastrtc for voice processing. The app:
+Both client applications (Electron and web) connect to a local FastAPI server that uses Fastrtc for voice processing. The system:
 
-1. Opens an Electron window pointing to your locally running FastAPI server
-2. Uses dual communication channels:
+1. Uses dual communication channels:
    - WebRTC for real-time audio streaming (microphone input and TTS output)
    - WebSocket for text communication (chat transcript and session management)
-3. Processes voice through a pipeline of:
+2. Processes voice through a pipeline of:
    - Speech-to-Text (STT) to transcribe user input
    - LLM processing via Claude to generate responses
    - Text-to-Speech (TTS) to convert responses to audio
+
+### Backend
 
 Fastrtc simplifies WebRTC implementation, which is traditionally complex. Fastrtc handles all the complex WebRTC setup with a simple `Stream` class that can be mounted on a FastAPI app. We get built-in functionality that would otherwise require custom implementation. This is done by the `ReplyOnPause`, check out the `main.py` file to see how it works.
 
@@ -95,16 +127,33 @@ Without Fastrtc, implementing this voice interface would require:
 - Manual audio processing and turn detection
 - Separate STT/TTS integration
 
-The server and Electron app run as separate processes, giving you flexibility to:
+### Architecture
+
+The backend server and client applications run as separate processes, giving you flexibility to:
 - Debug the server independently
-- Make server-side changes without restarting the Electron app
-- Connect other clients to the same server
+- Make server-side changes without restarting the client applications
+- Connect different clients to the same server
+- Choose between desktop (Electron) or browser (TypeScript web app) interfaces
 
 ## Building for distribution
 
+### Building the Electron App
+
 ```bash
-# Build the app
+# From the root directory
 npm run build
 ```
 
-This will create distributables in the `dist` folder.
+This will create desktop application distributables in the `dist` folder.
+
+### Building the Web App
+
+```bash
+# Navigate to the webapp directory
+cd webapp
+
+# Build for production
+npm run build
+```
+
+This will create production web files in the `webapp/dist` folder, which can be deployed to any web server.

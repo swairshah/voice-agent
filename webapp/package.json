@@ -1,0 +1,26 @@
+{
+  "name": "voice-agent-webapp",
+  "version": "1.0.0",
+  "description": "Web app for Voice Agent",
+  "main": "index.js",
+  "scripts": {
+    "start": "webpack serve --mode development",
+    "build": "webpack --mode production",
+    "type-check": "tsc --noEmit",
+    "backend": "cd .. && uvicorn main:app --host 0.0.0.0 --port 8000 --reload",
+    "backend-remote": "cd .. && uvicorn main:app --host 0.0.0.0 --port 8000"
+  },
+  "dependencies": {
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "ts-loader": "^9.5.1",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^4.15.1",
+    "html-webpack-plugin": "^5.5.3",
+    "css-loader": "^6.9.1",
+    "style-loader": "^3.3.4",
+    "@types/node": "^20.11.0"
+  }
+}
